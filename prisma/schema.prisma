@@ -1,0 +1,354 @@
+// صامل (Samel) — Marketplace & Auction Platform
+// SQLite for dev → PostgreSQL for production (swap provider + url)
+// NOTE: SQLite does not support Prisma enums — string fields with
+// documented values are used instead. Values are validated in app code.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String
+  // Email-first registration; phone is optional and can be added in settings.
+  // phoneVerified is reserved for future SMS-OTP gating of sensitive actions.
+  email         String    @unique
+  phone         String?   @unique
+  phoneVerified Boolean   @default(false)
+  passwordHash  String
+  city          String
+  avatarColor   String    @default("#F97316")
+  avatarUrl     String?
+  // USER | ADMIN | MODERATOR | SUPPORT | ACCOUNTANT
+  role          String    @default("USER")
+  credibility   Int       @default(50)
+  successfulTx  Int       @default(0)
+  points        Int       @default(0)
+  lastDailyAt   DateTime?
+  isPro         Boolean   @default(false)
+  isBanned      Boolean   @default(false)
+  createdAt     DateTime  @default(now())
+
+  listings      Listing[]
+  bids          Bid[]
+  favorites     Favorite[]
+  notifications Notification[]
+  credLogs      CredibilityLog[]
+  sales         Transaction[]    @relation("SellerTx")
+  purchases     Transaction[]    @relation("BuyerTx")
+  wonAuctions   Auction[]        @relation("AuctionWinner")
+  buyerConvs    Conversation[]   @relation("ConvBuyer")
+  sellerConvs   Conversation[]   @relation("ConvSeller")
+  messages      Message[]
+  evidences     Evidence[]
+  comments      Comment[]
+  reports       Report[]
+  reviewsGiven  Review[]         @relation("ReviewAuthor")
+  reviewsGotten Review[]         @relation("ReviewTarget")
+  store         Store?
+}
+
+model Category {
+  id        String     @id @default(cuid())
+  slug      String     @unique
+  nameAr    String
+  nameEn    String
+  icon      String // lucide icon key, resolved in app
+  sortOrder Int        @default(0)
+  parentId  String?
+  parent    Category?  @relation("SubCats", fields: [parentId], references: [id])
+  children  Category[] @relation("SubCats")
+  listings  Listing[]
+}
+
+model Listing {
+  id           String    @id @default(cuid())
+  // STANDARD | AUCTION
+  type         String    @default("STANDARD")
+  title        String
+  description  String
+  price        Int? // null for auctions (price lives on Auction)
+  // NEW | USED | LIKE_NEW
+  condition    String    @default("USED")
+  city         String
+  neighborhood String?
+  images       String    @default("[]") // JSON string[] of image urls
+  // ACTIVE | PENDING | SOLD | EXPIRED | REMOVED
+  status       String    @default("ACTIVE")
+  isFeatured   Boolean   @default(false)
+  featuredUntil DateTime?
+  views        Int       @default(0)
+  phone        String?
+  whatsapp     String?
+  showPhone    Boolean   @default(true)
+  // PICKUP | SHIPPING | DELIVERY
+  deliveryMethod String  @default("PICKUP")
+  // normalized Arabic text (title + description) for smart search
+  searchText   String    @default("")
+  createdAt    DateTime  @default(now())
+  expiresAt    DateTime?
+
+  sellerId   String
+  seller     User     @relation(fields: [sellerId], references: [id])
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id])
+
+  auction      Auction?
+  favorites    Favorite[]
+  transactions Transaction[]
+  convs        Conversation[]
+  comments     Comment[]
+
+  @@index([status, type, createdAt])
+  @@index([categoryId, status])
+  @@index([city])
+}
+
+model Comment {
+  id        String   @id @default(cuid())
+  listingId String
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  body      String
+  isHidden  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([listingId, createdAt])
+}
+
+model Report {
+  id         String    @id @default(cuid())
+  reporterId String
+  reporter   User      @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+  // LISTING | USER | COMMENT | MESSAGE
+  targetType String
+  targetId   String
+  reason     String
+  // OPEN | RESOLVED | DISMISSED
+  status     String    @default("OPEN")
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+
+  @@index([status, createdAt])
+}
+
+// Mutual rating after a CONFIRMED transaction
+model Review {
+  id            String   @id @default(cuid())
+  transactionId String
+  authorId      String
+  author        User     @relation("ReviewAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  targetId      String
+  target        User     @relation("ReviewTarget", fields: [targetId], references: [id], onDelete: Cascade)
+  rating        Int // 1..5
+  comment       String?
+  createdAt     DateTime @default(now())
+
+  @@unique([transactionId, authorId])
+  @@index([targetId])
+}
+
+// Admin-editable subscription packages
+model Plan {
+  id          String  @id @default(cuid())
+  key         String  @unique // FREE | PRO_MONTHLY | PRO_YEARLY
+  name        String
+  price       Int
+  period      String  @default("")
+  features    String  @default("[]") // JSON string[]
+  maxListings Int     @default(10)
+  maxAuctions Int     @default(3)
+  highlight   Boolean @default(false)
+  isActive    Boolean @default(true)
+  sortOrder   Int     @default(0)
+}
+
+model Store {
+  id          String   @id @default(cuid())
+  userId      String   @unique
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  slug        String   @unique
+  name        String
+  description String   @default("")
+  bannerUrl   String?
+  createdAt   DateTime @default(now())
+}
+
+model BannedWord {
+  id        String   @id @default(cuid())
+  word      String   @unique // stored normalized
+  createdAt DateTime @default(now())
+}
+
+model Auction {
+  id            String   @id @default(cuid())
+  listingId     String   @unique
+  listing       Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  startPrice    Int
+  minIncrement  Int      @default(50)
+  buyNowPrice   Int?
+  terms         String?
+  endsAt        DateTime
+  extendedCount Int      @default(0)
+  // LIVE | ENDED | NO_SALE | CANCELLED
+  status        String   @default("LIVE")
+  winnerId      String?
+  winner        User?    @relation("AuctionWinner", fields: [winnerId], references: [id])
+  winningBid    Int?
+  bids          Bid[]
+
+  @@index([status, endsAt])
+}
+
+model Bid {
+  id         String   @id @default(cuid())
+  auctionId  String
+  auction    Auction  @relation(fields: [auctionId], references: [id], onDelete: Cascade)
+  bidderId   String
+  bidder     User     @relation(fields: [bidderId], references: [id])
+  amount     Int
+  maskedName String // e.g. "صامل_482" — bidder privacy
+  createdAt  DateTime @default(now())
+
+  @@index([auctionId, amount])
+}
+
+// Mutual verification window after a sale/auction (48h)
+model Transaction {
+  id           String   @id @default(cuid())
+  listingId    String
+  listing      Listing  @relation(fields: [listingId], references: [id])
+  sellerId     String
+  seller       User     @relation("SellerTx", fields: [sellerId], references: [id])
+  buyerId      String
+  buyer        User     @relation("BuyerTx", fields: [buyerId], references: [id])
+  amount       Int
+  // AUCTION | STANDARD
+  source       String   @default("AUCTION")
+  // YES | NO (null = no answer yet)
+  sellerAnswer String?
+  buyerAnswer  String?
+  // PENDING | CONFIRMED | CANCELLED | DISPUTED | EXPIRED
+  status       String   @default("PENDING")
+  deadline     DateTime
+  createdAt    DateTime @default(now())
+  dispute      Dispute?
+
+  @@index([status, deadline])
+}
+
+model Dispute {
+  id                String      @id @default(cuid())
+  transactionId     String      @unique
+  transaction       Transaction @relation(fields: [transactionId], references: [id])
+  // OPEN | RESOLVED
+  status            String      @default("OPEN")
+  resolution        String?
+  // SELLER | BUYER
+  resolvedInFavorOf String?
+  createdAt         DateTime    @default(now())
+  resolvedAt        DateTime?
+  evidences         Evidence[]
+}
+
+model Evidence {
+  id        String   @id @default(cuid())
+  disputeId String
+  dispute   Dispute  @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  note      String?
+  fileUrl   String?
+  createdAt DateTime @default(now())
+}
+
+model Conversation {
+  id        String    @id @default(cuid())
+  listingId String
+  listing   Listing   @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  buyerId   String
+  buyer     User      @relation("ConvBuyer", fields: [buyerId], references: [id])
+  sellerId  String
+  seller    User      @relation("ConvSeller", fields: [sellerId], references: [id])
+  createdAt DateTime  @default(now())
+  messages  Message[]
+
+  @@unique([listingId, buyerId])
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderId       String
+  sender         User         @relation(fields: [senderId], references: [id])
+  body           String
+  createdAt      DateTime     @default(now())
+  readAt         DateTime?
+}
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // BID | OUTBID | ENDING_SOON | WON | SOLD | MESSAGE | CONFIRM | DISPUTE | ADMIN | SYSTEM
+  type      String
+  title     String
+  body      String
+  link      String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt])
+}
+
+model Favorite {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listingId String
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([userId, listingId])
+}
+
+model Banner {
+  id        String    @id @default(cuid())
+  title     String
+  imageUrl  String?
+  linkUrl   String?
+  // optional embed (AdSense / YouTube / TikTok iframe) — rendered instead of image
+  embedHtml String?
+  // HOME_TOP | HOME_MIDDLE | CATEGORY_TOP | AUCTION_SIDE
+  position  String    @default("HOME_TOP")
+  // ACTIVE | SCHEDULED | DISABLED
+  status    String    @default("ACTIVE")
+  startsAt  DateTime?
+  endsAt    DateTime?
+  clicks    Int       @default(0)
+  createdAt DateTime  @default(now())
+}
+
+model CredibilityLog {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  delta     Int
+  reason    String
+  createdAt DateTime @default(now())
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?
+  action    String
+  detail    String?
+  createdAt DateTime @default(now())
+}
